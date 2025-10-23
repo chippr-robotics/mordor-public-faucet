@@ -45,7 +45,7 @@ This repository provides **three different approaches** to token distribution on
 - ✅ No community distribution needed
 - ✅ Simple is better for your use case
 
-**Start here:** [QUICKSTART.md](QUICKSTART.md)
+**Start here:** [QUICKSTART.md](DOCUMENTATION/QUICKSTART.md)
 
 ---
 
@@ -56,7 +56,7 @@ This repository provides **three different approaches** to token distribution on
 - ✅ Distributing < 100 tokens total
 - ✅ Low-value testnet use only
 
-**Start here:** [PR_DISTRIBUTION_GUIDE.md](PR_DISTRIBUTION_GUIDE.md)
+**Start here:** [PR_DISTRIBUTION_GUIDE.md](DOCUMENTATION/PR_DISTRIBUTION_GUIDE.md)
 
 ---
 
@@ -68,7 +68,7 @@ This repository provides **three different approaches** to token distribution on
 - ✅ Want best practices
 - ✅ Professional setup
 
-**Start here:** [gnosis-safe/SAFE_QUICKSTART.md](gnosis-safe/SAFE_QUICKSTART.md)
+**Start here:** [gnosis-safe/SAFE_QUICKSTART.md](DOCUMENTATION/gnosis-safe/SAFE_QUICKSTART.md)
 
 ---
 
@@ -371,22 +371,22 @@ Approve → Key 2 Executes → Done (2 min)
 ## 📚 Documentation Quick Links
 
 ### Getting Started
-- [START_HERE.md](START_HERE.md) - Choose your approach
-- [INDEX.md](INDEX.md) - Complete navigation
+- [START_HERE.md](DOCUMENTATION/START_HERE.md) - Choose your approach
+- [INDEX.md](DOCUMENTATION/INDEX.md) - Complete navigation
 
 ### Manual Workflows
-- [QUICKSTART.md](QUICKSTART.md) - 5-minute setup
-- [README.md](README.md) - Full documentation
+- [QUICKSTART.md](DOCUMENTATION/QUICKSTART.md) - 5-minute setup
+- [README.md](DOCUMENTATION/README.md) - Full documentation
 
 ### PR Single-Key
-- [PR_DISTRIBUTION_GUIDE.md](PR_DISTRIBUTION_GUIDE.md) - Complete guide
-- [PR_QUICK_REFERENCE.md](PR_QUICK_REFERENCE.md) - Quick ref
+- [PR_DISTRIBUTION_GUIDE.md](DOCUMENTATION/PR_DISTRIBUTION_GUIDE.md) - Complete guide
+- [PR_QUICK_REFERENCE.md](DOCUMENTATION/PR_QUICK_REFERENCE.md) - Quick ref
 
 ### PR Multisig Safe ⭐
-- [gnosis-safe/README.md](gnosis-safe/README.md) - Overview
-- [gnosis-safe/SAFE_QUICKSTART.md](gnosis-safe/SAFE_QUICKSTART.md) - 30-min setup
-- [gnosis-safe/SAFE_SETUP_GUIDE.md](gnosis-safe/SAFE_SETUP_GUIDE.md) - Detailed guide
-- [gnosis-safe/SAFE_FAQ.md](gnosis-safe/SAFE_FAQ.md) - Troubleshooting
+- [gnosis-safe/README.md](DOCUMENTATION/gnosis-safe/README.md) - Overview
+- [gnosis-safe/SAFE_QUICKSTART.md](DOCUMENTATION/gnosis-safe/SAFE_QUICKSTART.md) - 30-min setup
+- [gnosis-safe/SAFE_SETUP_GUIDE.md](DOCUMENTATION/gnosis-safe/SAFE_SETUP_GUIDE.md) - Detailed guide
+- [gnosis-safe/SAFE_FAQ.md](DOCUMENTATION/gnosis-safe/SAFE_FAQ.md) - Troubleshooting
 
 ---
 
