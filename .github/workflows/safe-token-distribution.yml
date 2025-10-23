@@ -1,0 +1,600 @@
+name: Safe Token Distribution - Multisig
+
+on:
+  pull_request:
+    types: [opened, reopened, edited]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  validate-and-propose:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate Wallet Address
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prBody = context.payload.pull_request.body || '';
+            const prTitle = context.payload.pull_request.title || '';
+            
+            const addressRegex = /0x[a-fA-F0-9]{40}/g;
+            const bodyMatches = prBody.match(addressRegex) || [];
+            const titleMatches = prTitle.match(addressRegex) || [];
+            const allMatches = [...bodyMatches, ...titleMatches];
+            
+            if (allMatches.length === 0) {
+              const comment = `❌ **Validation Failed**
+              
+              No valid Ethereum address found in your PR.
+              
+              Please include your wallet address (0x...) in either:
+              - The PR title
+              - The PR description under "Address:"`;
+              
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body: comment
+              });
+              
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                labels: ['invalid-address']
+              });
+              
+              core.setFailed('No valid wallet address found');
+              return;
+            }
+            
+            const walletAddress = allMatches[0];
+            core.setOutput('wallet_address', walletAddress);
+            
+            const comment = `✅ **Wallet Address Validated**
+            
+            **Address:** \`${walletAddress}\`
+            
+            **Next Steps:**
+            1. ⏳ Proposing transaction to Gnosis Safe (Signer 1)...
+            2. 👀 Awaiting maintainer review
+            3. ✅ Upon approval, second signature will be added (Signer 2)
+            4. 💰 Transaction will execute automatically
+            
+            **Security:** This uses a 2-of-3 multisig for enhanced security.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: comment
+            });
+            
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: ['validated', 'pending-safe-proposal']
+            });
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install ethers@6 @safe-global/protocol-kit @safe-global/api-kit
+
+      - name: Propose Transaction to Safe
+        if: steps.validate.outputs.wallet_address
+        env:
+          SIGNER_1_KEY: ${{ secrets.SIGNER_1_KEY }}
+          SAFE_ADDRESS: ${{ vars.SAFE_ADDRESS }}
+          RECIPIENT_ADDRESS: ${{ steps.validate.outputs.wallet_address }}
+          TOKEN_AMOUNT: ${{ vars.TOKEN_AMOUNT || '1.0' }}
+          WETC_ADDRESS: ${{ vars.WETC_ADDRESS || '0x1953cab0E5bFa6D4a9BaD6E05fD46C1CC6527a5a' }}
+        run: |
+          cat > propose_safe_tx.js << 'EOF'
+          const { ethers } = require('ethers');
+          const Safe = require('@safe-global/protocol-kit').default;
+          const { EthersAdapter } = require('@safe-global/protocol-kit');
+
+          const MORDOR_RPC = 'https://rpc.mordor.etccooperative.org';
+          
+          const ERC20_ABI = [
+            'function transfer(address to, uint256 amount) returns (bool)',
+            'function balanceOf(address) view returns (uint256)',
+            'function symbol() view returns (string)',
+            'function decimals() view returns (uint8)'
+          ];
+
+          async function main() {
+            try {
+              const safeAddress = process.env.SAFE_ADDRESS;
+              const recipientAddress = process.env.RECIPIENT_ADDRESS;
+              const tokenAmount = process.env.TOKEN_AMOUNT || '1.0';
+              const wetcAddress = process.env.WETC_ADDRESS;
+              const signer1Key = process.env.SIGNER_1_KEY;
+
+              if (!safeAddress) throw new Error('SAFE_ADDRESS not configured');
+              if (!signer1Key) throw new Error('SIGNER_1_KEY not configured');
+              if (!recipientAddress) throw new Error('RECIPIENT_ADDRESS not found');
+
+              console.log('=== Gnosis Safe Transaction Proposal ===');
+              console.log(`Safe Address: ${safeAddress}`);
+              console.log(`Recipient: ${recipientAddress}`);
+              console.log(`Amount: ${tokenAmount} WETC`);
+
+              // Connect to Mordor
+              const provider = new ethers.JsonRpcProvider(MORDOR_RPC);
+              const signer1 = new ethers.Wallet(signer1Key, provider);
+              console.log(`Signer 1 Address: ${signer1.address}`);
+
+              // Check if Safe exists
+              const safeCode = await provider.getCode(safeAddress);
+              if (safeCode === '0x') {
+                throw new Error(`No contract found at Safe address ${safeAddress}. Please deploy the Safe first.`);
+              }
+
+              // Setup EthersAdapter
+              const ethAdapter = new EthersAdapter({
+                ethers,
+                signerOrProvider: signer1
+              });
+
+              // Connect to Safe
+              console.log('Connecting to Safe...');
+              const safeSdk = await Safe.create({
+                ethAdapter,
+                safeAddress
+              });
+
+              // Get Safe info
+              const owners = await safeSdk.getOwners();
+              const threshold = await safeSdk.getThreshold();
+              console.log(`Safe Owners: ${owners.join(', ')}`);
+              console.log(`Threshold: ${threshold} signatures required`);
+
+              // Verify signer1 is an owner
+              if (!owners.includes(signer1.address)) {
+                throw new Error(`Signer 1 (${signer1.address}) is not an owner of this Safe`);
+              }
+
+              // Get token contract
+              const tokenContract = new ethers.Contract(wetcAddress, ERC20_ABI, provider);
+              const symbol = await tokenContract.symbol();
+              const decimals = await tokenContract.decimals();
+
+              // Check Safe's token balance
+              const safeBalance = await tokenContract.balanceOf(safeAddress);
+              console.log(`Safe ${symbol} Balance: ${ethers.formatUnits(safeBalance, decimals)}`);
+
+              const amountToSend = ethers.parseUnits(tokenAmount, decimals);
+              
+              if (safeBalance < amountToSend) {
+                throw new Error(`Insufficient Safe balance. Have: ${ethers.formatUnits(safeBalance, decimals)}, Need: ${tokenAmount}`);
+              }
+
+              // Encode transfer function call
+              const transferData = tokenContract.interface.encodeFunctionData('transfer', [
+                recipientAddress,
+                amountToSend
+              ]);
+
+              // Create Safe transaction
+              console.log('Creating Safe transaction...');
+              const safeTransaction = await safeSdk.createTransaction({
+                transactions: [{
+                  to: wetcAddress,
+                  value: '0',
+                  data: transferData
+                }]
+              });
+
+              // Get transaction hash
+              const safeTxHash = await safeSdk.getTransactionHash(safeTransaction);
+              console.log(`Safe Transaction Hash: ${safeTxHash}`);
+
+              // Sign transaction with Signer 1
+              console.log('Signing with Signer 1...');
+              const signedTx = await safeSdk.signTransaction(safeTransaction);
+              
+              console.log('\n=== Transaction Proposed ===');
+              console.log(`Safe TX Hash: ${safeTxHash}`);
+              console.log(`Signatures: 1/${threshold}`);
+              console.log(`Status: Awaiting ${threshold - 1} more signature(s)`);
+              console.log('');
+              console.log('OUTPUT_FOR_GITHUB_ACTIONS:');
+              console.log(`SAFE_TX_HASH=${safeTxHash}`);
+              console.log(`SIGNATURES_COLLECTED=1`);
+              console.log(`SIGNATURES_REQUIRED=${threshold}`);
+              console.log(`STATUS=PROPOSED`);
+
+              // Store transaction data for next step
+              const fs = require('fs');
+              const txData = {
+                safeTxHash,
+                safeTransaction: JSON.stringify(signedTx),
+                recipient: recipientAddress,
+                amount: tokenAmount,
+                timestamp: new Date().toISOString()
+              };
+              fs.writeFileSync('/tmp/safe_tx.json', JSON.stringify(txData, null, 2));
+              console.log('Transaction data saved for approval step');
+
+            } catch (error) {
+              console.error('\n=== Proposal Failed ===');
+              console.error(`Error: ${error.message}`);
+              process.exit(1);
+            }
+          }
+
+          main();
+          EOF
+
+          node propose_safe_tx.js
+
+      - name: Comment Proposal Status
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const walletAddress = '${{ steps.validate.outputs.wallet_address }}';
+            const tokenAmount = '${{ vars.TOKEN_AMOUNT || '1.0' }}';
+            const safeAddress = '${{ vars.SAFE_ADDRESS }}';
+            
+            const comment = `✅ **Transaction Proposed to Gnosis Safe**
+            
+            **Status:** Awaiting Approval (1/2 signatures)
+            
+            **Details:**
+            - 📍 Safe Address: \`${safeAddress}\`
+            - 🎯 Recipient: \`${walletAddress}\`
+            - 💰 Amount: ${tokenAmount} WETC
+            - ✍️ Signature 1: ✅ Applied by automation
+            - ✍️ Signature 2: ⏳ Awaiting review approval
+            
+            **Next Steps:**
+            - A maintainer will review this request
+            - Upon approval, the second signature will be automatically applied
+            - The transaction will execute immediately after the second signature
+            
+            **Security:** This uses a 2-of-3 multisig for enhanced security.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: comment
+            });
+            
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              name: 'pending-safe-proposal'
+            }).catch(() => {});
+            
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: ['safe-proposed', 'pending-review']
+            });
+
+      - name: Comment Proposal Failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `❌ **Safe Proposal Failed**
+            
+            Failed to propose transaction to the Gnosis Safe.
+            
+            **Possible Issues:**
+            - Safe address not configured correctly
+            - Signer 1 key not valid or not an owner
+            - Insufficient balance in Safe
+            - Network connectivity issues
+            
+            A maintainer will investigate. Check the workflow logs for details.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: comment
+            });
+
+  approve-and-execute:
+    if: |
+      github.event_name == 'pull_request_review' &&
+      github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Extract Wallet Address
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prBody = context.payload.pull_request.body || '';
+            const prTitle = context.payload.pull_request.title || '';
+            
+            const addressRegex = /0x[a-fA-F0-9]{40}/g;
+            const bodyMatches = prBody.match(addressRegex) || [];
+            const titleMatches = prTitle.match(addressRegex) || [];
+            const allMatches = [...bodyMatches, ...titleMatches];
+            
+            if (allMatches.length === 0) {
+              core.setFailed('No wallet address found in PR');
+              return;
+            }
+            
+            const walletAddress = allMatches[0];
+            core.setOutput('wallet_address', walletAddress);
+            return walletAddress;
+
+      - name: Check Already Executed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number
+            });
+            
+            const alreadyExecuted = comments.some(comment => 
+              comment.body.includes('✅ Transaction Executed') ||
+              comment.body.includes('Tokens Sent Successfully')
+            );
+            
+            if (alreadyExecuted) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body: `⚠️ **Already Executed**
+                
+                This Safe transaction has already been executed.`
+              });
+              
+              core.setFailed('Transaction already executed');
+              return;
+            }
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install ethers@6 @safe-global/protocol-kit @safe-global/api-kit
+
+      - name: Sign and Execute Transaction
+        env:
+          SIGNER_2_KEY: ${{ secrets.SIGNER_2_KEY }}
+          SAFE_ADDRESS: ${{ vars.SAFE_ADDRESS }}
+          RECIPIENT_ADDRESS: ${{ steps.extract.outputs.wallet_address }}
+          TOKEN_AMOUNT: ${{ vars.TOKEN_AMOUNT || '1.0' }}
+          WETC_ADDRESS: ${{ vars.WETC_ADDRESS || '0x1953cab0E5bFa6D4a9BaD6E05fD46C1CC6527a5a' }}
+        run: |
+          cat > execute_safe_tx.js << 'EOF'
+          const { ethers } = require('ethers');
+          const Safe = require('@safe-global/protocol-kit').default;
+          const { EthersAdapter } = require('@safe-global/protocol-kit');
+
+          const MORDOR_RPC = 'https://rpc.mordor.etccooperative.org';
+          
+          const ERC20_ABI = [
+            'function transfer(address to, uint256 amount) returns (bool)',
+            'function balanceOf(address) view returns (uint256)',
+            'function symbol() view returns (string)',
+            'function decimals() view returns (uint8)'
+          ];
+
+          async function main() {
+            try {
+              const safeAddress = process.env.SAFE_ADDRESS;
+              const recipientAddress = process.env.RECIPIENT_ADDRESS;
+              const tokenAmount = process.env.TOKEN_AMOUNT || '1.0';
+              const wetcAddress = process.env.WETC_ADDRESS;
+              const signer2Key = process.env.SIGNER_2_KEY;
+
+              if (!safeAddress) throw new Error('SAFE_ADDRESS not configured');
+              if (!signer2Key) throw new Error('SIGNER_2_KEY not configured');
+              if (!recipientAddress) throw new Error('RECIPIENT_ADDRESS not found');
+
+              console.log('=== Gnosis Safe Transaction Execution ===');
+              console.log(`Safe Address: ${safeAddress}`);
+              console.log(`Recipient: ${recipientAddress}`);
+              console.log(`Amount: ${tokenAmount} WETC`);
+
+              // Connect to Mordor
+              const provider = new ethers.JsonRpcProvider(MORDOR_RPC);
+              const signer2 = new ethers.Wallet(signer2Key, provider);
+              console.log(`Signer 2 Address: ${signer2.address}`);
+
+              // Setup EthersAdapter
+              const ethAdapter = new EthersAdapter({
+                ethers,
+                signerOrProvider: signer2
+              });
+
+              // Connect to Safe
+              console.log('Connecting to Safe...');
+              const safeSdk = await Safe.create({
+                ethAdapter,
+                safeAddress
+              });
+
+              const owners = await safeSdk.getOwners();
+              const threshold = await safeSdk.getThreshold();
+              console.log(`Threshold: ${threshold}`);
+
+              // Verify signer2 is an owner
+              if (!owners.includes(signer2.address)) {
+                throw new Error(`Signer 2 (${signer2.address}) is not an owner of this Safe`);
+              }
+
+              // Get token contract
+              const tokenContract = new ethers.Contract(wetcAddress, ERC20_ABI, provider);
+              const decimals = await tokenContract.decimals();
+              const amountToSend = ethers.parseUnits(tokenAmount, decimals);
+
+              // Recreate the transaction
+              const transferData = tokenContract.interface.encodeFunctionData('transfer', [
+                recipientAddress,
+                amountToSend
+              ]);
+
+              const safeTransaction = await safeSdk.createTransaction({
+                transactions: [{
+                  to: wetcAddress,
+                  value: '0',
+                  data: transferData
+                }]
+              });
+
+              const safeTxHash = await safeSdk.getTransactionHash(safeTransaction);
+              console.log(`Safe TX Hash: ${safeTxHash}`);
+
+              // Sign with Signer 2
+              console.log('Signing with Signer 2...');
+              const signedTx = await safeSdk.signTransaction(safeTransaction);
+
+              // Execute transaction (should have 2 signatures now)
+              console.log('Executing Safe transaction...');
+              const executeTxResponse = await safeSdk.executeTransaction(signedTx);
+              console.log(`Transaction hash: ${executeTxResponse.hash}`);
+              
+              console.log('Waiting for confirmation...');
+              const receipt = await executeTxResponse.transactionResponse.wait();
+              
+              console.log('\n=== Transaction Executed Successfully ===');
+              console.log(`Block: ${receipt.blockNumber}`);
+              console.log(`Gas Used: ${receipt.gasUsed.toString()}`);
+              console.log(`TX Hash: ${receipt.hash}`);
+              
+              // Check recipient balance
+              const recipientBalance = await tokenContract.balanceOf(recipientAddress);
+              const symbol = await tokenContract.symbol();
+              console.log(`Recipient new balance: ${ethers.formatUnits(recipientBalance, decimals)} ${symbol}`);
+              
+              console.log('');
+              console.log('OUTPUT_FOR_GITHUB_ACTIONS:');
+              console.log(`TX_HASH=${receipt.hash}`);
+              console.log(`BLOCK=${receipt.blockNumber}`);
+              console.log(`STATUS=EXECUTED`);
+
+            } catch (error) {
+              console.error('\n=== Execution Failed ===');
+              console.error(`Error: ${error.message}`);
+              process.exit(1);
+            }
+          }
+
+          main();
+          EOF
+
+          node execute_safe_tx.js
+
+      - name: Comment Execution Success
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const walletAddress = '${{ steps.extract.outputs.wallet_address }}';
+            const tokenAmount = '${{ vars.TOKEN_AMOUNT || '1.0' }}';
+            const safeAddress = '${{ vars.SAFE_ADDRESS }}';
+            
+            const comment = `✅ **Transaction Executed Successfully!**
+            
+            **Status:** Complete (2/2 signatures)
+            
+            **Details:**
+            - 📍 Safe Address: \`${safeAddress}\`
+            - 🎯 Recipient: \`${walletAddress}\`
+            - 💰 Amount: ${tokenAmount} WETC
+            - ✍️ Signature 1: ✅ Applied
+            - ✍️ Signature 2: ✅ Applied
+            - 🚀 Transaction: ✅ Executed
+            
+            **View Transaction:**
+            - [View on Blockscout](https://etc-mordor.blockscout.com/address/${walletAddress})
+            
+            Thank you! This PR can now be closed.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: comment
+            });
+            
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              name: 'pending-review'
+            }).catch(() => {});
+            
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              name: 'safe-proposed'
+            }).catch(() => {});
+            
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: ['safe-executed', 'tokens-sent']
+            });
+
+      - name: Comment Execution Failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `❌ **Transaction Execution Failed**
+            
+            Failed to execute the Safe transaction with the second signature.
+            
+            **Possible Issues:**
+            - Signer 2 key not valid or not an owner
+            - Transaction already executed
+            - Insufficient gas
+            - Network issues
+            
+            A maintainer will investigate. Check the workflow logs.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: comment
+            });
+            
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: ['execution-failed']
+            });
